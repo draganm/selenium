@@ -134,7 +134,7 @@ func (wd *remoteWD) execute(method, url string, data []byte) (json.RawMessage, e
 }
 
 func (wd *remoteWD) executeWithContext(ctx context.Context, method, url string, data []byte) (json.RawMessage, error) {
-	return executeCommand(wd.ctx, method, url, data)
+	return executeCommand(ctx, method, url, data)
 }
 
 func executeCommand(ctx context.Context, method, url string, data []byte) (json.RawMessage, error) {
