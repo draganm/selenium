@@ -248,7 +248,7 @@ func NewRemote(ctx context.Context, capabilities Capabilities, urlPrefix string)
 	go func() {
 		<-ctx.Done()
 		if !wd.didQuit.Load() {
-			wd.Quit()
+			wd.quitWithContext(context.Background())
 		}
 	}()
 	if b := capabilities["browserName"]; b != nil {
