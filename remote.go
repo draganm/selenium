@@ -5,6 +5,7 @@ package selenium
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/blang/semver"
@@ -47,6 +49,7 @@ var remoteErrors = map[int]string{
 }
 
 type remoteWD struct {
+	ctx           context.Context
 	id, urlPrefix string
 	capabilities  Capabilities
 	w3cCompatible bool
@@ -54,6 +57,8 @@ type remoteWD struct {
 	storedActions  Actions
 	browser        string
 	browserVersion semver.Version
+	didQuit        *atomic.Bool
+	cancel         context.CancelFunc
 }
 
 // HTTPClient is the default client to use to communicate with the WebDriver
@@ -63,8 +68,8 @@ var HTTPClient = http.DefaultClient
 // jsonContentType is JSON content type.
 const jsonContentType = "application/json"
 
-func newRequest(method string, url string, data []byte) (*http.Request, error) {
-	request, err := http.NewRequest(method, url, bytes.NewBuffer(data))
+func newRequest(ctx context.Context, method string, url string, data []byte) (*http.Request, error) {
+	request, err := http.NewRequestWithContext(ctx, method, url, bytes.NewBuffer(data))
 	if err != nil {
 		return nil, err
 	}
@@ -125,12 +130,16 @@ func (e *Error) Error() string {
 // encoded by the remote end in a JSON structure. If no error is present, the
 // entire, raw request payload is returned.
 func (wd *remoteWD) execute(method, url string, data []byte) (json.RawMessage, error) {
-	return executeCommand(method, url, data)
+	return executeCommand(wd.ctx, method, url, data)
 }
 
-func executeCommand(method, url string, data []byte) (json.RawMessage, error) {
+func (wd *remoteWD) executeWithContext(ctx context.Context, method, url string, data []byte) (json.RawMessage, error) {
+	return executeCommand(wd.ctx, method, url, data)
+}
+
+func executeCommand(ctx context.Context, method, url string, data []byte) (json.RawMessage, error) {
 	debugLog("-> %s %s\n%s", method, filteredURL(url), data)
-	request, err := newRequest(method, url, data)
+	request, err := newRequest(ctx, method, url, data)
 	if err != nil {
 		return nil, err
 	}
@@ -219,15 +228,29 @@ const DefaultURLPrefix = "http://127.0.0.1:4444/wd/hub"
 //
 // Providing an empty string for urlPrefix causes the DefaultURLPrefix to be
 // used.
-func NewRemote(capabilities Capabilities, urlPrefix string) (WebDriver, error) {
+func NewRemote(ctx context.Context, capabilities Capabilities, urlPrefix string) (WebDriver, error) {
+
+	ctx, cancel := context.WithCancel(ctx)
 	if urlPrefix == "" {
 		urlPrefix = DefaultURLPrefix
 	}
 
 	wd := &remoteWD{
+		ctx:          ctx,
 		urlPrefix:    urlPrefix,
 		capabilities: capabilities,
+		didQuit:      &atomic.Bool{},
+		cancel:       cancel,
 	}
+
+	wd.didQuit.Store(false)
+
+	go func() {
+		<-ctx.Done()
+		if !wd.didQuit.Load() {
+			wd.Quit()
+		}
+	}()
 	if b := capabilities["browserName"]; b != nil {
 		wd.browser = b.(string)
 	}
@@ -240,13 +263,13 @@ func NewRemote(capabilities Capabilities, urlPrefix string) (WebDriver, error) {
 
 // DeleteSession deletes an existing session at the WebDriver instance
 // specified by the urlPrefix and the session ID.
-func DeleteSession(urlPrefix, id string) error {
+func DeleteSession(ctx context.Context, urlPrefix, id string) error {
 	u, err := url.Parse(urlPrefix)
 	if err != nil {
 		return err
 	}
 	u.Path = path.Join(u.Path, "session", id)
-	return voidCommand("DELETE", u.String(), nil)
+	return voidCommand(ctx, "DELETE", u.String(), nil)
 }
 
 func (wd *remoteWD) stringCommand(urlTemplate string) (string, error) {
@@ -268,7 +291,7 @@ func (wd *remoteWD) stringCommand(urlTemplate string) (string, error) {
 	return *reply.Value, nil
 }
 
-func voidCommand(method, url string, params interface{}) error {
+func voidCommand(ctx context.Context, method, url string, params interface{}) error {
 	if params == nil {
 		params = make(map[string]interface{})
 	}
@@ -276,12 +299,12 @@ func voidCommand(method, url string, params interface{}) error {
 	if err != nil {
 		return err
 	}
-	_, err = executeCommand(method, url, data)
+	_, err = executeCommand(ctx, method, url, data)
 	return err
 }
 
 func (wd *remoteWD) voidCommand(urlTemplate string, params interface{}) error {
-	return voidCommand("POST", wd.requestURL(urlTemplate, wd.id), params)
+	return voidCommand(wd.ctx, "POST", wd.requestURL(urlTemplate, wd.id), params)
 }
 
 func (wd remoteWD) stringsCommand(urlTemplate string) ([]string, error) {
@@ -590,7 +613,20 @@ func (wd *remoteWD) Quit() error {
 	if wd.id == "" {
 		return nil
 	}
+	wd.didQuit.Store(true)
+	defer wd.cancel()
 	_, err := wd.execute("DELETE", wd.requestURL("/session/%s", wd.id), nil)
+	if err == nil {
+		wd.id = ""
+	}
+	return err
+}
+
+func (wd *remoteWD) quitWithContext(ctx context.Context) error {
+	if wd.id == "" {
+		return nil
+	}
+	_, err := wd.executeWithContext(ctx, "DELETE", wd.requestURL("/session/%s", wd.id), nil)
 	if err == nil {
 		wd.id = ""
 	}
@@ -914,7 +950,7 @@ type cookie struct {
 	Secure   bool        `json:"secure"`
 	Expiry   interface{} `json:"expiry"`
 	HTTPOnly bool        `json:"httpOnly"`
-	SameSite string      `json:"sameSite",omitempty`
+	SameSite string      `json:"sameSite,omitempty"`
 }
 
 func (c cookie) sanitize() Cookie {
@@ -1192,7 +1228,7 @@ func (wd *remoteWD) PerformActions() error {
 }
 
 func (wd *remoteWD) ReleaseActions() error {
-	return voidCommand("DELETE", wd.requestURL("/session/%s/actions", wd.id), nil)
+	return voidCommand(wd.ctx, "DELETE", wd.requestURL("/session/%s/actions", wd.id), nil)
 }
 
 func (wd *remoteWD) DismissAlert() error {

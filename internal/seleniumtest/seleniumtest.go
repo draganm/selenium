@@ -48,7 +48,7 @@ func runTest(f func(*testing.T, Config), c Config) func(*testing.T) {
 }
 
 var NewRemote = func(_ *testing.T, caps selenium.Capabilities, addr string) (selenium.WebDriver, error) {
-	return selenium.NewRemote(caps, addr)
+	return selenium.NewRemote(context.Background(), caps, addr)
 }
 
 func newRemote(t *testing.T, caps selenium.Capabilities, c Config) selenium.WebDriver {
@@ -189,7 +189,7 @@ func testStatus(t *testing.T, c Config) {
 
 func testDeleteSession(t *testing.T, c Config) {
 	wd := newRemote(t, newTestCapabilities(t, c), c)
-	if err := selenium.DeleteSession(c.Addr, wd.SessionID()); err != nil {
+	if err := selenium.DeleteSession(context.Background(), c.Addr, wd.SessionID()); err != nil {
 		t.Fatalf("DeleteSession(%s, %s) returned error: %v", c.Addr, wd.SessionID(), err)
 	}
 }
