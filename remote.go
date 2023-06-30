@@ -613,12 +613,13 @@ func (wd *remoteWD) Quit() error {
 	if wd.id == "" {
 		return nil
 	}
-	wd.didQuit.Store(true)
 	defer wd.cancel()
 	_, err := wd.execute("DELETE", wd.requestURL("/session/%s", wd.id), nil)
 	if err == nil {
 		wd.id = ""
+		wd.didQuit.Store(true)
 	}
+
 	return err
 }
 
